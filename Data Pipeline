@@ -1,0 +1,293 @@
+Sys.setlocale(category = "LC_ALL", locale = "us")
+setwd("C:/Users/Administrator/Desktop/Masters.MBA Program Courses/Data 분석/Text Analytics")
+install.packages(c("ggplot", "e1071", "caret", "quanteda","iriba", "randomForest"))
+
+spam.raw <- read.csv("spam.csv", stringsAsFactors = FALSE)
+#stringAsFactor is set to false because we dont want our text
+#converted into factors, which R does automatically
+View(spam.raw)
+
+spam.raw <-spam.raw[, 1:2]
+#this gets rid of those extra 2 columns on the end, its telling
+#R we want all the rows and just the first 2 columns
+
+names(spam.raw) <-c("Label","Text")
+#changing the labels to something more useful
+
+#first need to check for missing data
+length(which(!complete.cases(spam.raw)))
+#completecases tells us if there are missing values or not
+#teh exclamation point "!" is a negation operator, so it
+#tells us what is NOT complete, length just tells you the 
+#number of missing data
+
+spam.raw$Label <- as.factor(spam.raw$Label)
+#converting labels to a factor later on so we can plot it and shit
+
+prop.table(table(spam.raw$Label))
+#this converts the raw counts from table (4825 ham, 747spam) into percentages
+
+
+#now we are gonna fuckin analyze the length of the text
+spam.raw$TextLength <- nchar(spam.raw$Text)
+#creating a new column of data in the set with nchar which will count the number of
+#characters of text.. bitch
+summary(spam.raw$TextLength)
+
+#now we must visualize da fukin data! wit ggplot
+library(ggplot2)
+
+ggplot(spam.raw, aes(x = TextLength, fill = Label)) +
+  theme_bw() + geom_histogram(binwidth = 5) +
+  labs(y = "Text Count", x = "Length of Text",
+       title = "Distribution of Text Lengths with Class Labels")
+# "fill = label" will color code the bars according to labels! this is why we made labels a factor earlier
+
+
+
+
+#we are not going to use all our data now, we'll put it aside and use it to simulate 
+#new business data coming in to the company, we do this just to test the effectiveness
+#of our model
+
+library(caret)
+help(package = "caret")
+#look at the fukin PDF!
+
+#gonna use caret to split the data 70/30, one set for training and the other sets for testing
+#seed for repoductibiility...? the seed number just makes sure im using the same random numbers as
+#the guy teaching this to me
+set.seed(32984)
+indexes <- createDataPartition(spam.raw$Label, times = 1, p = 0.7, list = FALSE)
+#this gives us a new sample of 70% of our data and keeps the original ratio of
+#spam to ham, also have to stop it from returning a list by setting it to false
+
+#the filter is the code above that made the index variable
+train <- spam.raw[indexes,] #filter the rows by the indexes, includes everything in the filter
+test <- spam.raw[-indexes,] #filter the rows by the indexes, includes everything NOT in the filter because of the negative sign
+
+
+#verify proportions, make sure the percentages stayed the same
+prop.table(table(train$Label))
+prop.table(table(test$Label))
+#and they did!
+
+#how do we represent text as data....??? with TOKENIZATION decompsing text into individual tokens/pieces
+train$Text[21]
+train$Text[38]
+train$Text[357]
+
+library(quanteda)
+help(package = "quanteda")
+#read da fuckin pdf
+
+#Lets apply tokenization to SMS text messages
+train.tokens <- tokens(train$Text, what = "word",
+                       remove_numbers = TRUE, remove_punct = TRUE,
+                       remove_symbols = TRUE, remove_hyphens = TRUE)
+
+#take a look at how tokens transforms the SMS data
+train.tokens[[357]]
+
+#now make everything lowercase because... BOW (bag of words) model
+#simplicity is bootyful
+train.tokens <- tokens_tolower(train.tokens)
+train.tokens[[357]]
+
+#now lets remove the stopwords (grammatical sugar such as "the")
+#always check stopword lists first
+train.tokens <- tokens_select(train.tokens, stopwords(),
+                              selection = "remove")
+#token_select removes or selects tokens from an object                              
+
+#now we must stem! stemming is collaspsing similar words into a singler term
+#such as ran, run, runs, running, we want these to all be understood as "run"
+train.tokens <- tokens_wordstem(train.tokens, language = "english")
+train.tokens[[357]]
+#notices the changes... soopah powerful
+
+#DATA PIPELINE defacto standard of tokenize lowercase remove numbers 
+#remove punctuation, remove hypehens, stopwords and stem
+
+#dfm will take our tokens and create a matrix, our bag-of-words model!!!
+train.tokens.dfm <- dfm(train.tokens, tolower = FALSE)
+#thanks to preprocessing we dont have to removing anything
+
+train.tokens.matrix <- as.matrix(train.tokens.dfm)
+View(train.tokens.matrix)
+#converts the matrix into a matrix R can read & display
+dim(train.tokens.matrix)
+#check the new deminsions, a lot more columns
+
+#lets check out the effects of stemming
+colnames(train.tokens.matrix)[1:50]
+
+#gonna do some cross validation to see how good our model will beez
+train.tokens.df <- cbind(Label = train$Label, as.data.frame(train.tokens.dfm))
+#making our data a standard R dataframe
+
+names(train.tokens.df)[c(146,148,235,238)]
+
+#cleanup the column names! using the makenames function which makes everything
+#valid syntactically 
+names(train.tokens.df) <- make.names(names(train.tokens.df))
+
+#now were gonna make 30 random stratified samples of... data? for testing?
+#this is all just to make the model more accurate
+set.seed(48743)
+cv.folds <- createMultiFolds(train$Label, k=10,times=3)
+cv.cntrl <- trainControl(method = "repeatedcv", number = 10,
+                         repeats = 3, index=cv.folds)
+#setting index to cv.folds since its already been made
+
+install.packages("doSNOW")
+library(doSNOW)
+
+#time the execution
+start.time <- Sys.time()
+
+#create a cluster to work on 10 logical cores
+
+cl<-makeCluster(3, type="SOCK")
+registerDoSNOW(cl)
+
+#here we go... getting complicated
+rpart.cv.1 <- train(Label ~ ., data = train.tokens.df, method="rpart",
+                    trControl=cv.cntrl, tuneLength=7)
+
+#processing is done, stop cluster.
+stopCluster(cl)
+
+#calculating execution time
+total.time <- Sys.time() - start.time
+total.time
+
+#check out results
+rpart.cv.1
+
+#creating a function for finding relative term frequency (TF)
+term.frequency <- function(row) {
+  row / sum(row)
+}
+
+#creating a function for calculating inverse document frequency (IDF)
+inverse.doc.freq <- function(col) {
+  corpus.size <- length(col)
+  doc.count <- length(which(col > 0))
+  
+  log10(corpus.size / doc.count)
+}
+
+tf.idf <- function(tf, idf) {
+  tf * idf
+}
+
+#now we must normalize all the documents.. why? because we want all of our
+#documents on an equal length - apply is like a "for loop" and
+#the "1" signifies the rows
+train.tokens.df <- apply(train.tokens.matrix, 1, term.frequency)
+dim(train.tokens.df)
+#this transposes the data, or switches the rows for columns
+View(train.tokens.df[1:20, 1:100])
+
+
+#now we calcualte the IDF vector.. why? i dont know...
+#the "2" signifies columns
+train.tokens.idf <- apply(train.tokens.matrix, 2, inverse.doc.freq)
+str(train.tokens.idf)
+
+#lastly we must calcualte TF-IDF for training corpus..? wtf is corpus
+#the matrix was transposed so we run it against the columns by using "2"
+train.tokens.tfidf <- apply(train.tokens.df, 2, tf.idf, idf=train.tokens.idf)
+dim(train.tokens.tfidf)
+View(train.tokens.tfidf[1:25, 1:25])
+#on our sheet a higher number in the text1 column will represent a
+#word that does not appear often, so its significant
+
+#now lets transpose the matrix back to.. what it was so we can 
+#use it in our model so it can be used in the future by... others?
+train.tokens.tfidf <- t(train.tokens.tfidf)
+dim(train.tokens.tfidf)
+View(train.tokens.tfidf[1:25, 1:25])
+
+#check for incomplete cases.. why tho...
+#why because an error could leave an empty string in the data which will return an error
+incomplete.cases <- which(!complete.cases(train.tokens.tfidf))
+train$Text[incomplete.cases] #shows where the incomplete cases are
+
+
+#fix the incomplete cases now! because machines models will give errors if
+#you leave them in
+#this code will just replace them all with zeros
+train.tokens.tfidf[incomplete.cases,] <- rep(0.0, ncol(train.tokens.tfidf))
+dim(train.tokens.tfidf)
+#quickly check again for incomeplete cases
+sum(which(!complete.cases(train.tokens.tfidf)))
+
+#now lets make a clean data frame and clean up the names
+train.tokens.tfidf.df <- cbind(Label = train$Label, data.frame(train.tokens.tfidf))
+names(train.tokens.tfidf.df) <- make.names(names(train.tokens.tfidf.df))
+
+#time the code execution
+start.time <- Sys.time()
+
+#create a cluster to.. do sometihng?
+cl <- makeCluster(3, type="SOCK")
+registerDoSNOW(cl)
+
+#data is trivial in size so our model is .... weak?
+#this is the same as before except were using tfidf data instead
+rpart.cv.2 <- train(Label ~., data = train.tokens.tfidf.df, method = "rpart",
+                    trControl = cv.cntrl, tuneLength = 7)
+
+#processing is done, stop cluster
+stopCluster(cl)
+
+#total execution time on workstation
+total.time <- Sys.time() - start.time
+total.time
+
+#check out the muthaflippin results
+rpart.cv.2
+
+
+#gonna add... bigrams so our data is less garbage? garbage in garbage out
+#bigrams just combine words that are close to each other 
+#bigrams make our model more powerful BUT more than DOUBLE the size of the matrix!
+
+#add bigrams - tokens_ngrams add in bigrams, setting to 1 gives unigrams (just bag of words)
+#and setting it to 1:2 gives unigrams and bigrams
+train.tokens <- tokens_ngrams(train.tokens, n = 1:2)
+train.tokens[[357]]
+
+#transform to data frame matrix and then matrix
+train.tokens.dfm < dfm(train.tokens, tolower = FALSE)
+train.tokens.matrix <- as.matrix(train.tokens.dfm)
+train.tokens.dfm
+
+
+#normalize all documents via TF
+train.tokens.df <- apply(train.tokens.matrix, 1, term.frequency)
+
+#calculate IDF vector that we will use for training and test data
+train.tokens.idf <- apply(train.tokens.matrix, 2, inverse.doc.freq)
+
+#calcualte TF-IDF for training corpus
+train.tokens.tfidf <- apply(train.tokens.df, 2, tf.idf,
+                            idf = train.tokens.idf)
+
+#transpose the matrix
+train.tokens.tfidf <- t(train.tokens.tfidf)
+
+#fix incomplete cases
+incomplete.cases <- which(!complete.cases(train.tokens.tfidf))
+train.tokens.tfidf[incomplete.cases,] <- rep(0.0, ncol(train.tokens.tfidf))
+
+#make a clean data frame
+train.tokens.tfidf.df <- cbind(Label = train$Label, data.frame(train.tokens.tfidf))
+names(train.tokens.tfidf.df) <- make.names(names(train.tokens.tfidf.df))
+
+#clean up used object in memory
+gc()
+
+
